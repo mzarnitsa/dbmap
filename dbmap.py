@@ -10,6 +10,7 @@ class DbMap:
         self.param_sql_session = None
         self.param_output_file = None
         self.param_schemas = None
+        self.first_tables = None
         self.param_names_only = None
 
         self.schemas = None
@@ -50,6 +51,7 @@ If not provided, all schemas will be processed.
         parser.add_argument('-n', '--names-only', action='store_true', default=False, dest='names_only',
                             help='User table names only, no column information will be printed.')
 
+        ####################################################
         args = parser.parse_args()
 
         if args.password is None:
@@ -73,7 +75,11 @@ If not provided, all schemas will be processed.
         self.read_command_line_params()
 
         if self.param_output_file is not None:
-            self.param_output_file = codecs.open(self.param_output_file, 'w', 'utf-8')
+            try:
+                file_name = self.param_output_file
+                self.param_output_file = codecs.open(self.param_output_file, 'w', 'utf-8')
+            except Exception as e:
+                raise SystemExit('Error opening file {}: {}'.format(file_name, e))
         try:
             try:
                 self.output_progress('reading tables')
@@ -131,14 +137,17 @@ If not provided, all schemas will be processed.
         return result
 
     def read_tables(self):
-        r = self.param_sql_session.execute("""
-SELECT table_schema, table_name
-FROM information_schema.tables
-WHERE table_type = 'BASE TABLE'
-  AND table_name NOT IN ('dtproperties', 'sysdiagrams')
-  AND table_schema NOT IN ('information_schema', 'pg_catalog')
-ORDER BY table_schema, table_name
-        """)
+        try:
+            r = self.param_sql_session.execute("""
+    SELECT table_schema, table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+      AND table_name NOT IN ('dtproperties', 'sysdiagrams')
+      AND table_schema NOT IN ('information_schema', 'pg_catalog')
+    ORDER BY table_schema, table_name
+            """)
+        except Exception as e:
+            raise SystemExit('Error connecting to database {}'.format(e.orig))
 
         result = []
         for row in r:
