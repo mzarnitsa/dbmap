@@ -10,14 +10,18 @@ class DbMap:
         self.param_sql_session = None
         self.param_output_file = None
         self.param_schemas = None
-        self.first_tables = None
+        self.param_tables = None
         self.param_names_only = None
+        self.param_first_relationships = None
+        self.param_second_relationships = None
 
         self.schemas = None
         self.tables = None
         self.columns = None
         self.constraints_pk = None
         self.constraints_fk = None
+
+        self.tables_to_print = None
 
     def read_command_line_params(self):
         parser = argparse.ArgumentParser(description='''
@@ -48,11 +52,26 @@ Comma separated (no spaces) list of schemas to make relationship diagram for.
 If not provided, all schemas will be processed.
                             ''')
 
+        parser.add_argument('-t', '--tables', dest='tables', default='',
+                            help='''
+Comma separated (no spaces) list of table names ([<schema>.]<table>) to make relationship diagram for.
+If provided, specified tables will be displayed.
+                            ''')
+
+        parser.add_argument('-1', '--first-relationships', dest='first_relationships', action='store_true', default=False,
+                            help='If provided, first relationships of selected tables will also be displayed.')
+
+        parser.add_argument('-2', '--second-relationships', dest='second_relationships', action='store_true', default=False,
+                            help='If provided, first and second relationships of selected tables will also be displayed.')
+
         parser.add_argument('-n', '--names-only', action='store_true', default=False, dest='names_only',
                             help='User table names only, no column information will be printed.')
 
         ####################################################
         args = parser.parse_args()
+
+        # if args.first_tables != '' and args.schemas != '':
+        #     raise SystemExit('ERROR: Cannot use parameters -s/--schemas and -1/--first-relationships in combination')
 
         if args.password is None:
             args.password = getpass.getpass('Password:')
@@ -69,6 +88,13 @@ If not provided, all schemas will be processed.
         else:
             self.param_schemas = []
 
+        if args.tables != '':
+            self.param_tables = args.tables.lower().split(',')
+        else:
+            self.param_tables = []
+
+        self.param_first_relationships = args.first_relationships
+        self.param_second_relationships = args.second_relationships
         self.param_names_only = args.names_only
 
     def run(self):
@@ -80,16 +106,23 @@ If not provided, all schemas will be processed.
                 self.param_output_file = codecs.open(self.param_output_file, 'w', 'utf-8')
             except Exception as e:
                 raise SystemExit('Error opening file {}: {}'.format(file_name, e))
+
         try:
             try:
                 self.output_progress('reading tables')
-                self.tables = self.read_tables()
+                if len(self.param_tables) == 0:
+                    self.tables = self.read_tables()
+                else:
+                    self.tables = self.read_tables()
+
                 self.output_progress('reading columns')
                 self.columns = self.read_columns()
                 self.output_progress('reading primary keys')
                 self.constraints_pk = self.read_constraints_pk()
                 self.output_progress('reading foreign keys')
                 self.constraints_fk = self.read_constraints_fk()
+
+                self.tables_to_print = self.select_tables_for_output()
 
                 self.output_progress('writing database')
                 if not self.param_names_only:
@@ -151,9 +184,8 @@ If not provided, all schemas will be processed.
 
         result = []
         for row in r:
-            if len(self.param_schemas) == 0 or row["table_schema"].lower() in self.param_schemas:
-                table_name = self.translate_table_name(row["table_schema"], row["table_name"])
-                result.append(table_name)
+            table_name = self.translate_table_name(row["table_schema"], row["table_name"])
+            result.append(table_name)
 
         return result
 
@@ -207,12 +239,11 @@ WHERE c.CONSTRAINT_TYPE IN ('PRIMARY KEY')
 
         result = {}
         for row in r:
-            if len(self.param_schemas) == 0 or row["table_schema"].lower() in self.param_schemas:
-                table_name = self.translate_table_name(row["table_schema"], row["table_name"])
-                if table_name not in result:
-                    result[table_name] = []
+            table_name = self.translate_table_name(row["table_schema"], row["table_name"])
+            if table_name not in result:
+                result[table_name] = []
 
-                result[table_name].append(row['column_name'])
+            result[table_name].append(row['column_name'])
 
         return result
 
@@ -245,16 +276,55 @@ ORDER BY CONSTRAINT_SCHEMA, CONSTRAINT_NAME
 
         result = []
         for row in r:
-            if len(self.param_schemas) == 0 or row["table_schema"].lower() in self.param_schemas and row["unique_table_schema"].lower() in self.param_schemas:
-                table_name = self.translate_table_name(row["table_schema"], row["table_name"])
-                pk_table_name = self.translate_table_name(row["unique_table_schema"], row["unique_table_name"])
-                pk = {
-                    'table': table_name,
-                    'column': row['column_name'],
-                    'pk_table': pk_table_name,
-                    'pk_column': row['unique_column_name'],
-                }
-                result.append(pk)
+            table_name = self.translate_table_name(row["table_schema"], row["table_name"])
+            pk_table_name = self.translate_table_name(row["unique_table_schema"], row["unique_table_name"])
+            pk = {
+                'table': table_name,
+                'column': row['column_name'],
+                'pk_table': pk_table_name,
+                'pk_column': row['unique_column_name'],
+            }
+            result.append(pk)
+
+        return result
+
+    def select_dependent_tables(self, tables):
+        result = []
+
+        for table in tables:
+            fks = [fk for fk in self.constraints_fk if fk['table'].lower() == table.lower()]
+            for fk in fks:
+                result.append(fk['pk_table'])
+
+            fks = [fk for fk in self.constraints_fk if fk['pk_table'].lower() == table.lower()]
+            for fk in fks:
+                result.append(fk['table'])
+
+        result = list(set(tables) | set(result))
+        return result
+
+    def select_tables_for_output(self):
+        result = []
+
+        if len(self.param_schemas) == 0 and len(self.param_tables) == 0:
+            result = self.tables
+        else:
+            if len(self.param_schemas) > 0:
+                for param_schema in self.param_schemas:
+                    result = [table for table in self.tables if table.lower().startswith(param_schema+'.')]
+
+            if len(self.param_tables) > 0:
+                for param_table in self.param_tables:
+                    result = [table for table in self.tables if table.lower() == param_table]
+
+            if self.param_first_relationships or self.param_second_relationships:
+                result = self.select_dependent_tables(result)
+
+            if self.param_second_relationships:
+                result = self.select_dependent_tables(result)
+
+        result = list(set(result))
+        print(result)
 
         return result
 
@@ -264,7 +334,7 @@ ORDER BY CONSTRAINT_SCHEMA, CONSTRAINT_NAME
         self.param_output_file.write("    node [shape=plaintext]\n")
         self.param_output_file.write("    splines=compound\n\n")
 
-        for table in self.tables:
+        for table in self.tables_to_print:
             self.param_output_file.write("    {}[label=<\n".format(table.replace('.', '_')))
             self.param_output_file.write("<TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0'>\n")
             self.param_output_file.write("    <tr><td colspan='2' bgcolor='lightgray'>{}</td></tr>\n".format(table))
@@ -298,12 +368,13 @@ ORDER BY CONSTRAINT_SCHEMA, CONSTRAINT_NAME
         #Tables without fields should have shapes, not just text
         self.param_output_file.write("    node [shape=recorder style=filled fillcolor=lightgray]\n\n")
         for constraint in self.constraints_fk:
-            from_name = "{}:{}".format(constraint['table'].replace('.', '_'), constraint['column'])
-            to_name = "{}:{}_TO".format(constraint['pk_table'].replace('.', '_'), constraint['pk_column'])
+            if constraint['table'] in self.tables_to_print and constraint['pk_table'] in self.tables_to_print:
+                from_name = "{}:{}".format(constraint['table'].replace('.', '_'), constraint['column'])
+                to_name = "{}:{}_TO".format(constraint['pk_table'].replace('.', '_'), constraint['pk_column'])
 
-            self.param_output_file.write(
-                "    {} -> {}[arrowhead=normal arrowtail=tee dir=both]\n".format(from_name, to_name)
-            )
+                self.param_output_file.write(
+                    "    {} -> {}[arrowhead=normal arrowtail=tee dir=both]\n".format(from_name, to_name)
+                )
 
         self.param_output_file.write("}\n")
 
@@ -313,19 +384,20 @@ ORDER BY CONSTRAINT_SCHEMA, CONSTRAINT_NAME
         self.param_output_file.write("    node [shape=block]\n")
         self.param_output_file.write("    splines=compound\n\n")
 
-        for table in self.tables:
+        for table in self.tables_to_print:
             self.param_output_file.write('    {}[label="{}"]\n'.format(table.replace('.', '_'), table))
 
         #references
         #Tables without fields should have shapes, not just text
         self.param_output_file.write("    node [shape=recorder style=filled fillcolor=lightgray]\n\n")
         for constraint in self.constraints_fk:
-            from_name = constraint['table'].replace('.', '_')
-            to_name = constraint['pk_table'].replace('.', '_')
+            if constraint['table'] in self.tables_to_print and constraint['pk_table'] in self.tables_to_print:
+                from_name = constraint['table'].replace('.', '_')
+                to_name = constraint['pk_table'].replace('.', '_')
 
-            self.param_output_file.write(
-                "    {} -> {}[arrowhead=normal arrowtail=tee dir=both]\n".format(from_name, to_name)
-            )
+                self.param_output_file.write(
+                    "    {} -> {}[arrowhead=normal arrowtail=tee dir=both]\n".format(from_name, to_name)
+                )
 
         self.param_output_file.write("}\n")
 
